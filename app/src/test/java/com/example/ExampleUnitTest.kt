@@ -1,7 +1,9 @@
 package com.example
 
 import com.example.data.engine.CommonMarkDocumentEngine
+import com.example.data.engine.GitGraphLayoutEngine
 import com.example.data.remote.GitHubRestClient
+import com.example.domain.model.GraphSegmentRole
 import com.example.domain.model.MarkdownAstBlock
 import com.example.domain.model.RawDocumentPayload
 import com.example.domain.model.RepoFileNode
@@ -17,8 +19,8 @@ class ExampleUnitTest {
     @Test
     fun parseAndExtractGitHubCoordinates_handlesShareTextAndUrls() {
         assertEquals(
-            "commonmark" to "commonmark-spec",
-            GitHubRestClient.parseGitHubCoordinates("commonmark/commonmark-spec")
+            "git" to "git",
+            GitHubRestClient.parseGitHubCoordinates("git/git")
         )
         assertEquals(
             "JetBrains" to "kotlin",
@@ -33,6 +35,46 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun gitGraphLayoutEngine_computes1000CommitsAcross100BranchesOptimally() = runTest {
+        val engine = GitGraphLayoutEngine()
+        val commits = engine.generateHighScaleMultiBranchDag(
+            repoSlug = "git/git",
+            defaultBranch = "master",
+            targetCommitCount = 1050,
+            targetBranchCount = 112
+        )
+        assertEquals(1050, commits.size)
+
+        val graph = engine.computeCommitGraphLayout(
+            repoId = "git/git",
+            repoSlug = "git/git",
+            activeBranch = "master",
+            commits = commits,
+            totalBranchesCount = 112,
+            isHighScaleBenchmarkMode = true,
+            isLiveFromGitHub = false
+        )
+
+        assertEquals(1050, graph.rows.size)
+        assertTrue(graph.totalBranchesRepresented >= 100)
+        assertTrue(graph.maxConcurrentLanes >= 4)
+
+        // Verify top showcase rows M, L, K, J have parallel lanes and S-curve fork/merge segments
+        val rowM = graph.rows[0]
+        val rowL = graph.rows[1]
+        assertEquals("M", rowM.commit.shortSha)
+        assertEquals("L", rowL.commit.shortSha)
+        assertTrue(
+            graph.rows.any { r ->
+                r.segments.any {
+                    it.role == GraphSegmentRole.CENTER_TO_BOTTOM_CURVE ||
+                        it.role == GraphSegmentRole.TOP_TO_CENTER_CURVE
+                }
+            }
+        )
+    }
+
+    @Test
     fun optimizedInRepoSearch_ranksExactPrefixAndFuzzyMatches() = runTest {
         val searchUseCase = ComputeVisibleTreeNodesUseCase()
         val nodes = listOf(
@@ -41,12 +83,10 @@ class ExampleUnitTest {
             RepoFileNode("3", "r", "src/main/ParserCore.kt", "ParserCore.kt", "src/main", false, 300L, "s3", 2)
         )
 
-        // Multi-token path + filename search
         val docsArch = searchUseCase(nodes, emptySet(), "docs arch", markdownOnly = false)
         assertEquals(1, docsArch.size)
         assertEquals("docs/architecture-guide.md", docsArch.first().path)
 
-        // Fuzzy subsequence search ("rmd" -> "README.md")
         val fuzzyReadme = searchUseCase(nodes, emptySet(), "rmd", markdownOnly = false)
         assertTrue(fuzzyReadme.any { it.name == "README.md" })
     }
@@ -67,7 +107,7 @@ class ExampleUnitTest {
         )
         val payload = RawDocumentPayload(
             repoId = "repo",
-            repoSlug = "commonmark/commonmark-spec",
+            repoSlug = "git/git",
             branch = "master",
             path = "README.md",
             fileName = "README.md",

@@ -1,23 +1,70 @@
 package com.example.domain.usecase
 
+import com.example.domain.model.GitGraphCommitRow
+import com.example.domain.model.GitHostProvider
+import com.example.domain.model.GitRepoCommitGraph
 import com.example.domain.model.GitRepositoryCard
 import com.example.domain.model.ParsedMarkdownDocument
+import com.example.domain.model.ProviderCredential
+import com.example.domain.model.RepoAccessibilityProbe
 import com.example.domain.model.RepoFileNode
 import com.example.domain.port.DocumentReaderPort
 import com.example.domain.port.FileTreeExplorerPort
+import com.example.domain.port.GitCommitGraphPort
 import com.example.domain.port.MarkdownEnginePort
+import com.example.domain.port.ProviderCredentialsPort
 import com.example.domain.port.RepositoryCatalogPort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
 /**
- * Clean Architecture Use Cases orchestrating real GitHub repository operations and search.
+ * Clean Architecture Use Cases orchestrating real GitHub repository operations,
+ * one-time "git/git" gesture seeding, progressive repo verification, branch switching,
+ * O(V + E) multi-branch commit graph loading, and optimized in-repo search.
  */
 class ObserveRepositoriesUseCase(
     private val catalogPort: RepositoryCatalogPort
 ) {
     operator fun invoke(): Flow<List<GitRepositoryCard>> = catalogPort.observeRepositories()
+
+    suspend fun ensureDefaultGitSeededOnce() {
+        catalogPort.ensureDefaultGitRepositorySeededOnce()
+    }
+}
+
+class ManageProviderCredentialsUseCase(
+    private val credentialsPort: ProviderCredentialsPort,
+    private val catalogPort: RepositoryCatalogPort
+) {
+    fun observeCredentials(): Flow<List<ProviderCredential>> =
+        credentialsPort.observeProviderCredentials()
+
+    suspend fun saveToken(provider: GitHostProvider, rawToken: String) {
+        val cleaned = rawToken.trim()
+        if (cleaned.isEmpty()) {
+            credentialsPort.clearAccessToken(provider)
+        } else {
+            credentialsPort.saveAccessToken(provider, cleaned)
+            catalogPort.syncAllPendingRepositories()
+        }
+    }
+
+    suspend fun clearToken(provider: GitHostProvider) {
+        credentialsPort.clearAccessToken(provider)
+    }
+}
+
+class ProbeRepositoryAccessibilityUseCase(
+    private val catalogPort: RepositoryCatalogPort
+) {
+    suspend operator fun invoke(rawRepoInput: String): Result<RepoAccessibilityProbe> {
+        val trimmed = rawRepoInput.trim()
+        if (trimmed.isBlank()) {
+            return Result.failure(IllegalArgumentException("Please enter a GitHub repository link or owner/repo."))
+        }
+        return catalogPort.probeRepositoryAccessibility(trimmed)
+    }
 }
 
 class AddGitHubRepositoryUseCase(
@@ -26,7 +73,8 @@ class AddGitHubRepositoryUseCase(
     suspend operator fun invoke(
         rawRepoInput: String,
         branchOverride: String?,
-        repoSpecificToken: String
+        knownBranches: List<String> = emptyList(),
+        saveUrlEvenIfPrivateOrUnreachable: Boolean = false
     ): Result<GitRepositoryCard> {
         val trimmed = rawRepoInput.trim()
         if (trimmed.isBlank()) {
@@ -35,7 +83,8 @@ class AddGitHubRepositoryUseCase(
         return catalogPort.addGitHubRepository(
             rawRepoInput = trimmed,
             branchOverride = branchOverride?.trim()?.takeIf { it.isNotEmpty() },
-            repoSpecificToken = repoSpecificToken.trim()
+            knownBranches = knownBranches,
+            saveUrlEvenIfPrivateOrUnreachable = saveUrlEvenIfPrivateOrUnreachable
         )
     }
 }
@@ -45,6 +94,18 @@ class RefreshRepositoryUseCase(
 ) {
     suspend operator fun invoke(repoId: String): Result<GitRepositoryCard> {
         return catalogPort.refreshRepository(repoId)
+    }
+}
+
+class SwitchRepositoryBranchUseCase(
+    private val catalogPort: RepositoryCatalogPort
+) {
+    suspend fun fetchBranches(repoId: String): Result<List<String>> {
+        return catalogPort.fetchBranchesForRepo(repoId)
+    }
+
+    suspend fun switchBranch(repoId: String, targetBranch: String): Result<GitRepositoryCard> {
+        return catalogPort.switchRepositoryBranch(repoId, targetBranch.trim())
     }
 }
 
@@ -73,6 +134,53 @@ class ObserveRepositoryTreeUseCase(
     }
 }
 
+class LoadRepositoryCommitGraphUseCase(
+    private val catalogPort: RepositoryCatalogPort,
+    private val commitGraphPort: GitCommitGraphPort
+) {
+    suspend operator fun invoke(
+        repoId: String,
+        highScaleBenchmarkMode: Boolean = false,
+        forceRefresh: Boolean = false
+    ): Result<GitRepoCommitGraph> {
+        val repo = catalogPort.getRepositoryById(repoId)
+            ?: return Result.failure(IllegalStateException("Repository not found"))
+        return commitGraphPort.loadRepositoryCommitGraph(
+            repo = repo,
+            highScaleBenchmarkMode = highScaleBenchmarkMode,
+            forceRefresh = forceRefresh
+        )
+    }
+
+    suspend fun filterCommitRows(
+        allRows: List<GitGraphCommitRow>,
+        rawQuery: String,
+        branchFilter: String?
+    ): List<GitGraphCommitRow> = withContext(Dispatchers.Default) {
+        val q = rawQuery.trim().lowercase()
+        val branch = branchFilter?.trim()?.takeIf { it.isNotEmpty() }
+
+        if (q.isEmpty() && branch == null) return@withContext allRows
+
+        allRows.filter { row ->
+            val matchesBranch = branch == null ||
+                row.commit.primaryBranch.equals(branch, ignoreCase = true) ||
+                row.commit.branchNames.any { it.equals(branch, ignoreCase = true) } ||
+                row.badgeLabel.equals(branch, ignoreCase = true)
+
+            if (!matchesBranch) return@filter false
+            if (q.isEmpty()) return@filter true
+
+            row.commit.subject.lowercase().contains(q) ||
+                row.commit.shortSha.lowercase().contains(q) ||
+                row.commit.sha.lowercase().startsWith(q) ||
+                row.commit.authorName.lowercase().contains(q) ||
+                row.badgeLabel.lowercase().contains(q) ||
+                row.commit.branchNames.any { it.lowercase().contains(q) }
+        }
+    }
+}
+
 class OpenDocumentAsMarkdownUseCase(
     private val catalogPort: RepositoryCatalogPort,
     private val documentReaderPort: DocumentReaderPort,
@@ -97,15 +205,6 @@ class OpenDocumentAsMarkdownUseCase(
     }
 }
 
-/**
- * High-performance In-Repository Search & Tree Flattening UseCase.
- * Runs on Dispatchers.Default with multi-tier relevance scoring:
- * 1. Exact filename match
- * 2. Filename prefix match
- * 3. Filename substring match
- * 4. Multi-token path segment match (e.g. "docs arch" -> "docs/architecture.md")
- * 5. Fuzzy subsequence match (e.g. "rmd" -> "README.md")
- */
 class ComputeVisibleTreeNodesUseCase {
 
     suspend operator fun invoke(
@@ -131,7 +230,6 @@ class ComputeVisibleTreeNodesUseCase {
             }
 
             if (query.isEmpty()) {
-                // Markdown-only mode with no query: show markdown & license files sorted by depth then name
                 val baseScore = if (node.isLicenseOrReadme) 200 else 100
                 scoredResults.add(node to (baseScore - node.depth))
                 continue
@@ -160,7 +258,6 @@ class ComputeVisibleTreeNodesUseCase {
         val name = node.nameLower
         val path = node.pathLower
 
-        // All space-separated tokens must match either as a substring in path or fuzzy subsequence in name
         for (token in tokens) {
             if (!path.contains(token) && !isFuzzySubsequence(token, name)) {
                 return 0
@@ -177,12 +274,10 @@ class ComputeVisibleTreeNodesUseCase {
             else -> score += 100
         }
 
-        // Boost markdown and README/LICENSE files slightly in a Markdown reader
         if (node.isPureMarkdown) score += 45
         if (node.isLicenseOrReadme) score += 35
         if (!node.isDirectory) score += 20
 
-        // Prefer shorter filenames / shallower paths on ties
         score -= (node.depth * 4)
         return score.coerceAtLeast(1)
     }

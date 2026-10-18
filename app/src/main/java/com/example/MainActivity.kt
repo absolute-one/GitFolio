@@ -33,9 +33,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         if (savedInstanceState == null) {
-            extractSharedGitPayload(intent)?.let { sharedText ->
-                viewModel.handleIncomingSharedGitUrl(sharedText)
-            }
+            consumeIncomingShareIntent(intent)
         }
 
         setContent {
@@ -45,6 +43,8 @@ class MainActivity : ComponentActivity() {
                 GitFolioRootApp(
                     viewModel = viewModel,
                     onCloseAppToSource = {
+                        viewModel.dismissSharedOverlay()
+                        moveTaskToBack(true)
                         finish()
                     }
                 )
@@ -54,15 +54,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        setIntent(intent)
-        extractSharedGitPayload(intent)?.let { sharedText ->
-            viewModel.handleIncomingSharedGitUrl(sharedText)
-        }
+        consumeIncomingShareIntent(intent)
     }
 
-    private fun extractSharedGitPayload(incomingIntent: Intent?): String? {
-        if (incomingIntent == null) return null
-        return when (incomingIntent.action) {
+    override fun onStop() {
+        super.onStop()
+        viewModel.dismissSharedOverlay()
+    }
+
+    private fun consumeIncomingShareIntent(incomingIntent: Intent?) {
+        if (incomingIntent == null) return
+        if ((incomingIntent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
+            return
+        }
+
+        val sharedPayload = when (incomingIntent.action) {
             Intent.ACTION_SEND -> {
                 if (incomingIntent.type?.startsWith("text/") == true) {
                     incomingIntent.getStringExtra(Intent.EXTRA_TEXT)
@@ -75,6 +81,15 @@ class MainActivity : ComponentActivity() {
             }
             else -> null
         }
+
+        incomingIntent.removeExtra(Intent.EXTRA_TEXT)
+        incomingIntent.data = null
+        incomingIntent.action = Intent.ACTION_MAIN
+        setIntent(Intent(this, MainActivity::class.java).apply { action = Intent.ACTION_MAIN })
+
+        if (!sharedPayload.isNullOrBlank()) {
+            viewModel.handleIncomingSharedGitUrl(sharedPayload)
+        }
     }
 }
 
@@ -85,10 +100,11 @@ fun GitFolioRootApp(
 ) {
     val currentScreen by viewModel.currentScreen.collectAsStateWithLifecycle()
     val repositories by viewModel.repositories.collectAsStateWithLifecycle()
+    val providerCredentials by viewModel.providerCredentials.collectAsStateWithLifecycle()
     val syncingRepoIds by viewModel.syncingRepoIds.collectAsStateWithLifecycle()
+    val addRepoProbeState by viewModel.addRepoProbeState.collectAsStateWithLifecycle()
     val isAddingRepo by viewModel.isAddingRepo.collectAsStateWithLifecycle()
     val feedbackMessage by viewModel.homeFeedbackMessage.collectAsStateWithLifecycle()
-    val prefilledRepoUrl by viewModel.prefilledRepoUrlForAddSheet.collectAsStateWithLifecycle()
     val sharedOverlayState by viewModel.sharedOverlayState.collectAsStateWithLifecycle()
     val explorerState by viewModel.explorerState.collectAsStateWithLifecycle()
     val readerState by viewModel.readerState.collectAsStateWithLifecycle()
@@ -106,17 +122,21 @@ fun GitFolioRootApp(
                 ScreenDestination.HomeBento -> {
                     HomeBentoScreen(
                         repositories = repositories,
+                        providerCredentials = providerCredentials,
                         syncingRepoIds = syncingRepoIds,
+                        addRepoProbeState = addRepoProbeState,
                         isAddingRepo = isAddingRepo,
                         feedbackMessage = feedbackMessage,
-                        prefilledRepoUrlForAddSheet = prefilledRepoUrl,
                         darkThemeEnabled = darkThemeEnabled,
                         onToggleTheme = viewModel::toggleTheme,
                         onDismissFeedback = viewModel::clearHomeFeedback,
-                        onConsumePrefilledRepoUrl = viewModel::consumePrefilledRepoUrl,
                         onOpenRepository = viewModel::openRepositoryExplorer,
                         onRefreshRepository = viewModel::refreshRepositoryOnTile,
                         onConfirmRemoveRepository = viewModel::removeRepository,
+                        onSaveProviderToken = viewModel::saveProviderToken,
+                        onClearProviderToken = viewModel::clearProviderToken,
+                        onProbeRepositoryInput = viewModel::probeRepositoryInput,
+                        onResetRepoProbe = viewModel::resetRepoProbe,
                         onAddRepositorySubmit = viewModel::addRepository
                     )
                 }
@@ -125,12 +145,18 @@ fun GitFolioRootApp(
                     RepoExplorerScreen(
                         state = explorerState,
                         onBack = viewModel::navigateBack,
+                        onSelectViewMode = viewModel::selectExplorerViewMode,
                         onRefreshTree = viewModel::refreshCurrentExplorerTree,
+                        onRequestBranchListRefresh = viewModel::refreshCurrentExplorerBranches,
+                        onSwitchBranch = viewModel::switchCurrentExplorerBranch,
                         onToggleFolder = viewModel::toggleFolderExpanded,
                         onExpandAll = viewModel::expandAllFolders,
                         onCollapseAll = viewModel::collapseAllFolders,
                         onSearchQueryChange = viewModel::updateExplorerSearch,
                         onToggleMarkdownFilter = viewModel::toggleMarkdownOnlyFilter,
+                        onCommitSearchQueryChange = viewModel::updateCommitGraphSearch,
+                        onSelectCommitBranchFilter = viewModel::selectCommitGraphBranchFilter,
+                        onToggleHighScaleGraphMode = viewModel::toggleHighScaleCommitGraphMode,
                         onOpenFile = viewModel::openFileInMarkdownReader
                     )
                 }
@@ -152,7 +178,6 @@ fun GitFolioRootApp(
         SharedRepoAcknowledgementOverlay(
             state = sharedOverlayState,
             onCloseAppImmediately = {
-                viewModel.dismissSharedOverlay()
                 onCloseAppToSource()
             },
             onReadRepositoryNow = { mountedRepo ->
@@ -160,9 +185,6 @@ fun GitFolioRootApp(
             },
             onStayOnShelf = {
                 viewModel.dismissSharedOverlay()
-            },
-            onRetryWithToken = { rawUrl ->
-                viewModel.retrySharedRepoWithToken(rawUrl)
             }
         )
     }

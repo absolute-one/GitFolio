@@ -26,7 +26,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -85,8 +84,7 @@ fun SharedRepoAcknowledgementOverlay(
     state: SharedRepoOverlayState,
     onCloseAppImmediately: () -> Unit,
     onReadRepositoryNow: (GitRepositoryCard) -> Unit,
-    onStayOnShelf: () -> Unit,
-    onRetryWithToken: (String) -> Unit
+    onStayOnShelf: () -> Unit
 ) {
     if (state is SharedRepoOverlayState.Hidden) return
 
@@ -96,7 +94,6 @@ fun SharedRepoAcknowledgementOverlay(
 
     LaunchedEffect(state, autoReturnCancelledByTap) {
         if (state is SharedRepoOverlayState.MountedSuccess) {
-            // Animate checkmark stroke drawing
             launch {
                 tickProgress.animateTo(
                     targetValue = 1f,
@@ -104,7 +101,6 @@ fun SharedRepoAcknowledgementOverlay(
                 )
             }
             if (!autoReturnCancelledByTap) {
-                // Smoothly contract the visual portal aura over 3,000ms (no numeric timer)
                 portalHorizonFraction.animateTo(
                     targetValue = 0f,
                     animationSpec = tween(durationMillis = 3000, easing = LinearEasing)
@@ -158,7 +154,6 @@ fun SharedRepoAcknowledgementOverlay(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
                 ) {
-                    // Tapping card also cancels auto-return so user stays in app
                     if (state is SharedRepoOverlayState.MountedSuccess && !autoReturnCancelledByTap) {
                         autoReturnCancelledByTap = true
                     }
@@ -179,7 +174,7 @@ fun SharedRepoAcknowledgementOverlay(
                         )
                         Spacer(modifier = Modifier.height(18.dp))
                         Text(
-                            text = "Mounting Shared Repository…",
+                            text = "Saving Shared Repository…",
                             style = MaterialTheme.typography.headlineMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                             textAlign = TextAlign.Center
@@ -198,7 +193,6 @@ fun SharedRepoAcknowledgementOverlay(
                     is SharedRepoOverlayState.MountedSuccess -> {
                         val repo = state.repository
 
-                        // Animated Vector Checkmark + Contracting Orbital Portal Ring
                         AnimatedTickWithPortalRing(
                             tickProgress = tickProgress.value,
                             portalFraction = if (autoReturnCancelledByTap) 1f else portalHorizonFraction.value,
@@ -212,7 +206,7 @@ fun SharedRepoAcknowledgementOverlay(
                             shape = RoundedCornerShape(8.dp)
                         ) {
                             Text(
-                                text = "ADDED TO GITFOLIO SHELF",
+                                text = "SAVED TO GITFOLIO SHELF",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = CyberMint,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
@@ -232,7 +226,11 @@ fun SharedRepoAcknowledgementOverlay(
                         Spacer(modifier = Modifier.height(4.dp))
 
                         Text(
-                            text = "${repo.totalFilesCount} files indexed on ${repo.defaultBranch}",
+                            text = if (repo.isPendingPrivateSync) {
+                                "Repository URL saved · Ready for OAuth sync"
+                            } else {
+                                "${repo.totalFilesCount} files indexed on ${repo.defaultBranch}"
+                            },
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
@@ -240,7 +238,6 @@ fun SharedRepoAcknowledgementOverlay(
 
                         Spacer(modifier = Modifier.height(18.dp))
 
-                        // Creative Non-Numeric Visual Indicator of Auto-Return vs Stay
                         DepletingHorizonVisualBar(
                             fraction = if (autoReturnCancelledByTap) 1f else portalHorizonFraction.value,
                             isPaused = autoReturnCancelledByTap
@@ -277,7 +274,6 @@ fun SharedRepoAcknowledgementOverlay(
 
                         Spacer(modifier = Modifier.height(22.dp))
 
-                        // Explicit Close and Read Buttons
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -337,7 +333,7 @@ fun SharedRepoAcknowledgementOverlay(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "Could Not Mount Shared Repo",
+                            text = "Invalid GitHub URL",
                             style = MaterialTheme.typography.titleLarge,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -363,19 +359,13 @@ fun SharedRepoAcknowledgementOverlay(
                                 Text("Close")
                             }
                             Button(
-                                onClick = { onRetryWithToken(state.rawSharedUrl) },
+                                onClick = onStayOnShelf,
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Key,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Add Token")
+                                Text("Open App")
                             }
                         }
                     }
@@ -402,14 +392,12 @@ private fun AnimatedTickWithPortalRing(
             val inset = strokeWidth / 2f
             val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
 
-            // Subtle track circle
             drawCircle(
                 color = CyberMint.copy(alpha = 0.14f),
                 radius = (size.minDimension - strokeWidth) / 2f,
                 style = Stroke(width = strokeWidth)
             )
 
-            // Contracting orbital portal arc (sweeps from 360 deg down to 0 deg as portal closes)
             val sweepAngle = 360f * portalFraction.coerceIn(0f, 1f)
             drawArc(
                 brush = Brush.sweepGradient(
@@ -427,13 +415,11 @@ private fun AnimatedTickWithPortalRing(
                 style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
             )
 
-            // Inner glowing disc
             drawCircle(
                 color = CyberMint.copy(alpha = 0.12f),
                 radius = size.minDimension * 0.36f
             )
 
-            // Animated Checkmark (Tick) vector path
             val fullTickPath = Path().apply {
                 moveTo(size.width * 0.30f, size.height * 0.52f)
                 lineTo(size.width * 0.45f, size.height * 0.66f)
@@ -462,10 +448,6 @@ private fun AnimatedTickWithPortalRing(
     }
 }
 
-/**
- * Creative non-numeric horizon bar that contracts symmetrically toward the center
- * to visualize the window gently closing to return to the calling app.
- */
 @Composable
 private fun DepletingHorizonVisualBar(
     fraction: Float,

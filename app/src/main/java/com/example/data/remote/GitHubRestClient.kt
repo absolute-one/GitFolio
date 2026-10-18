@@ -1,10 +1,12 @@
 package com.example.data.remote
 
 import android.util.Base64
+import com.example.domain.model.GitCommitNode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -13,7 +15,8 @@ data class GitHubRepoMetaDto(
     val owner: String,
     val name: String,
     val defaultBranch: String,
-    val description: String
+    val description: String,
+    val isPrivate: Boolean
 )
 
 data class GitHubTreeEntryDto(
@@ -23,9 +26,13 @@ data class GitHubTreeEntryDto(
     val sha: String
 )
 
+data class GitHubBranchRefDto(
+    val name: String,
+    val headSha: String
+)
+
 /**
- * Clean REST client for GitHub API v3 + Raw Content streaming.
- * Attaches the repository-specific OAuth / Personal Access Token per request.
+ * Clean REST client for GitHub API v3 + Raw Content streaming + Multi-branch Commit DAG fetching.
  */
 class GitHubRestClient(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
@@ -53,7 +60,7 @@ class GitHubRestClient(
                     val hint = when (response.code) {
                         401 -> "Invalid OAuth / Personal Access Token (401)."
                         403 -> "GitHub API rate limit or token permission denied (403)."
-                        404 -> "Repository '$owner/$repo' not found or private (404)."
+                        404 -> "Repository '$owner/$repo' not found or private (404). Configure your GitHub OAuth token if private."
                         else -> "GitHub API HTTP ${response.code}: ${response.message}"
                     }
                     throw IOException(hint)
@@ -64,6 +71,7 @@ class GitHubRestClient(
                 val resolvedOwner = ownerObj?.optString("login")?.takeIf { it.isNotBlank() } ?: owner
                 val resolvedName = json.optString("name").takeIf { it.isNotBlank() } ?: repo
                 val defaultBranch = json.optString("default_branch").takeIf { it.isNotBlank() } ?: "main"
+                val isPrivate = json.optBoolean("private", false)
                 val desc = json.optString("description", "")
                     .takeIf { it != "null" && it.isNotBlank() }
                     ?: "Live GitHub repository connected for Markdown & source reading."
@@ -71,10 +79,150 @@ class GitHubRestClient(
                     owner = resolvedOwner,
                     name = resolvedName,
                     defaultBranch = defaultBranch,
-                    description = desc
+                    description = desc,
+                    isPrivate = isPrivate
                 )
             }
         }
+    }
+
+    suspend fun fetchRepoBranches(
+        owner: String,
+        repo: String,
+        repoSpecificToken: String
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        fetchRepoBranchRefs(owner, repo, repoSpecificToken).map { list ->
+            list.map { it.name }
+        }
+    }
+
+    suspend fun fetchRepoBranchRefs(
+        owner: String,
+        repo: String,
+        repoSpecificToken: String
+    ): Result<List<GitHubBranchRefDto>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val requestBuilder = Request.Builder()
+                .url("https://api.github.com/repos/$owner/$repo/branches?per_page=100")
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", "GitFolio-Android-Markdown-Reader")
+            if (repoSpecificToken.isNotBlank()) {
+                requestBuilder.header("Authorization", formatAuthHeader(repoSpecificToken))
+            }
+
+            httpClient.newCall(requestBuilder.build()).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw IOException("GitHub Branches HTTP ${response.code}: ${response.message}")
+                }
+                val bodyStr = response.body?.string().orEmpty()
+                val arr = JSONArray(bodyStr)
+                val branches = ArrayList<GitHubBranchRefDto>(arr.length())
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val name = obj.optString("name", "").trim()
+                    val commitObj = obj.optJSONObject("commit")
+                    val headSha = commitObj?.optString("sha", "")?.trim().orEmpty()
+                    if (name.isNotEmpty()) {
+                        branches.add(GitHubBranchRefDto(name = name, headSha = headSha))
+                    }
+                }
+                branches
+            }
+        }
+    }
+
+    suspend fun fetchRepoCommits(
+        owner: String,
+        repo: String,
+        branch: String,
+        branchRefs: List<GitHubBranchRefDto>,
+        perPage: Int = 100,
+        repoSpecificToken: String
+    ): Result<List<GitCommitNode>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val requestBuilder = Request.Builder()
+                .url("https://api.github.com/repos/$owner/$repo/commits?sha=$branch&per_page=$perPage")
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", "GitFolio-Android-Markdown-Reader")
+            if (repoSpecificToken.isNotBlank()) {
+                requestBuilder.header("Authorization", formatAuthHeader(repoSpecificToken))
+            }
+
+            val branchNamesByHeadSha = branchRefs.groupBy(
+                keySelector = { it.headSha },
+                valueTransform = { it.name }
+            )
+
+            httpClient.newCall(requestBuilder.build()).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw IOException("GitHub Commits HTTP ${response.code}: ${response.message}")
+                }
+                val bodyStr = response.body?.string().orEmpty()
+                val arr = JSONArray(bodyStr)
+                val commits = ArrayList<GitCommitNode>(arr.length())
+                val nowMs = System.currentTimeMillis()
+
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val sha = obj.optString("sha", "").trim()
+                    if (sha.isEmpty()) continue
+                    val shortSha = sha.take(7)
+
+                    val commitObj = obj.optJSONObject("commit")
+                    val rawMessage = commitObj?.optString("message", "")?.trim().orEmpty()
+                    val subject = rawMessage.lineSequence().firstOrNull()?.trim()
+                        ?.takeIf { it.isNotEmpty() } ?: "Commit $shortSha"
+
+                    val authorObj = commitObj?.optJSONObject("author")
+                    val authorName = authorObj?.optString("name", "")?.takeIf { it.isNotBlank() }
+                        ?: obj.optJSONObject("author")?.optString("login", "")
+                        ?: "Contributor"
+                    val dateIso = authorObj?.optString("date", "")?.take(10).orEmpty()
+
+                    val parentsArr = obj.optJSONArray("parents")
+                    val parentShas = ArrayList<String>(parentsArr?.length() ?: 0)
+                    if (parentsArr != null) {
+                        for (p in 0 until parentsArr.length()) {
+                            val pSha = parentsArr.optJSONObject(p)?.optString("sha", "")?.trim().orEmpty()
+                            if (pSha.isNotEmpty()) {
+                                parentShas.add(pSha)
+                            }
+                        }
+                    }
+
+                    val matchingHeads = branchNamesByHeadSha[sha].orEmpty()
+                    val isMerge = parentShas.size > 1
+                    val derivedBranchName = when {
+                        matchingHeads.isNotEmpty() -> matchingHeads.first()
+                        i == 0 -> branch
+                        isMerge -> extractMergedBranchName(subject) ?: branch
+                        else -> branch
+                    }
+
+                    commits.add(
+                        GitCommitNode(
+                            sha = sha,
+                            shortSha = shortSha,
+                            subject = subject,
+                            body = rawMessage,
+                            authorName = authorName,
+                            authorDateIso = dateIso.ifEmpty { "recent" },
+                            committedEpochMs = nowMs - (i * 3_600_000L),
+                            parentShas = parentShas,
+                            branchNames = if (matchingHeads.isNotEmpty()) matchingHeads else listOf(derivedBranchName),
+                            primaryBranch = derivedBranchName,
+                            isBranchTip = i == 0 || matchingHeads.isNotEmpty()
+                        )
+                    )
+                }
+                commits
+            }
+        }
+    }
+
+    private fun extractMergedBranchName(subject: String): String? {
+        val branchRegex = Regex("Merge (?:branch|pull request) ['\"]?([^'\"\\s]+)['\"]?", RegexOption.IGNORE_CASE)
+        return branchRegex.find(subject)?.groupValues?.getOrNull(1)
     }
 
     suspend fun fetchRecursiveTree(
@@ -137,7 +285,6 @@ class GitHubRestClient(
         repoSpecificToken: String
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            // 1. Try GitHub API contents endpoint first if token is provided (supports private repos)
             if (repoSpecificToken.isNotBlank()) {
                 val apiReq = Request.Builder()
                     .url("https://api.github.com/repos/$owner/$repo/contents/$path?ref=$branch")
@@ -153,7 +300,6 @@ class GitHubRestClient(
                 }
             }
 
-            // 2. Try raw.githubusercontent.com for fast direct text streaming
             val rawUrl = "https://raw.githubusercontent.com/$owner/$repo/$branch/$path"
             val rawReqBuilder = Request.Builder()
                 .url(rawUrl)
@@ -168,7 +314,6 @@ class GitHubRestClient(
                 }
             }
 
-            // 3. Fallback to JSON contents endpoint (Base64 encoded)
             val fallbackReqBuilder = Request.Builder()
                 .url("https://api.github.com/repos/$owner/$repo/contents/$path?ref=$branch")
                 .header("Accept", "application/vnd.github+json")
@@ -216,9 +361,6 @@ class GitHubRestClient(
             RegexOption.IGNORE_CASE
         )
 
-        /**
-         * Extracts a valid "owner/repo" slug from arbitrary shared text or URLs from 3rd-party apps.
-         */
         fun extractGitHubCoordinatesFromSharedText(rawSharedText: String): Pair<String, String>? {
             val trimmed = rawSharedText.trim()
             if (trimmed.isEmpty()) return null
@@ -235,13 +377,6 @@ class GitHubRestClient(
             return parseGitHubCoordinates(trimmed)
         }
 
-        /**
-         * Parses user input such as:
-         * - "commonmark/commonmark-spec"
-         * - "https://github.com/JetBrains/kotlin"
-         * - "https://github.com/rust-lang/mdBook/tree/master"
-         * - "git@github.com:torvalds/linux.git"
-         */
         fun parseGitHubCoordinates(rawInput: String): Pair<String, String>? {
             var cleaned = rawInput.trim()
                 .removeSuffix("/")
