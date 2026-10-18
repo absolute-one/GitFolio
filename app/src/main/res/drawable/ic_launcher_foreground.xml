@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer document card frame -->
+    <path
+        android:fillColor="#FFF5F2EB"
+        android:pathData="M28,31C28,27.69 30.69,25 34,25H74C77.31,25 80,27.69 80,31V77C80,80.31 77.31,83 74,83H34C30.69,83 28,80.31 28,77V31Z" />
+    <!-- Top accent bar -->
+    <path
+        android:fillColor="#FFFF6B35"
+        android:pathData="M28,31C28,27.69 30.69,25 34,25H74C77.31,25 80,27.69 80,31V36H28V31Z" />
+    <!-- Bold Markdown 'M' silhouette -->
+    <path
+        android:fillColor="#FF14161B"
+        android:pathData="M35,66V44H41.5L47.5,53.5L53.5,44H60V66H54V53L47.5,62.5L41,53V66H35Z" />
+    <!-- Markdown downward arrow in electric amber -->
+    <path
+        android:fillColor="#FFFF6B35"
+        android:pathData="M67,44H72V56H76.5L69.5,65.5L62.5,56H67V44Z" />
+    <!-- Subtle bottom reading rule -->
+    <path
+        android:fillColor="#FFD5CFC2"
+        android:pathData="M35,72H73V75H35V72Z" />
+</vector>

@@ -1,0 +1,6 @@
+{
+  "name": "GitFolio",
+  "description": "Minimalist, Clean Architecture GitHub Markdown reader with a Bento repository grid, expandable file tree explorer, and virtualized CommonMark AST engine for 200+ page documents.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

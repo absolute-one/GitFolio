@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">GitFolio</string>
+    <string name="home_subtitle">GIT MARKDOWN READER</string>
+    <string name="add_repository">Add Repository</string>
+    <string name="refresh_repository">Refresh repository</string>
+    <string name="remove_repository">Remove repository</string>
+    <string name="navigate_back">Navigate back</string>
+    <string name="table_of_contents">Table of Contents</string>
+    <string name="reader_typography">Reader Typography</string>
+    <string name="search_files_hint">Filter files or folders…</string>
+    <string name="empty_repos_title">Your Reading Shelf is Empty</string>
+    <string name="empty_repos_subtitle">Add any public or private GitHub repository with its own token to browse and read Markdown &amp; source documents instantaneously.</string>
+</resources>
