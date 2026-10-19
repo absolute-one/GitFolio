@@ -87,6 +87,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -251,11 +252,13 @@ fun HomeBentoScreen(
                     ) {
                         items(
                             items = repositories,
-                            key = { repo -> repo.id }
+                            key = { repo -> repo.id },
+                            contentType = { "repo_tile" }
                         ) { repo ->
+                            val isSyncing = syncingRepoIds.contains(repo.id)
                             SwipeableRepositoryTile(
                                 repo = repo,
-                                isSyncing = syncingRepoIds.contains(repo.id),
+                                isSyncing = isSyncing,
                                 onClick = { onOpenRepository(repo.id) },
                                 onOpenInBrowserClick = {
                                     runCatching { uriHandler.openUri(repo.htmlUrl) }
@@ -455,7 +458,7 @@ private fun HomeMinimalHeader(
 
 /**
  * Full-width Repository Tile wrapped in a Swipe-Left-to-Delete gesture box
- * with a dynamic crimson reveal effect and confirmation dialog trigger.
+ * with a cached crimson reveal effect and confirmation dialog trigger.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -471,7 +474,6 @@ private fun SwipeableRepositoryTile(
         confirmValueChange = { targetValue ->
             if (targetValue == SwipeToDismissBoxValue.EndToStart) {
                 onSwipeLeftToDelete()
-                // Return false so the tile snaps back smoothly while the confirmation dialog is shown
                 false
             } else {
                 false
@@ -479,33 +481,39 @@ private fun SwipeableRepositoryTile(
         }
     )
 
-    val isSwipingLeft = dismissState.targetValue == SwipeToDismissBoxValue.EndToStart ||
-        dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart
-
-    val iconScale by animateFloatAsState(
-        targetValue = if (dismissState.targetValue == SwipeToDismissBoxValue.EndToStart) 1.28f else 0.92f,
-        animationSpec = spring(dampingRatio = 0.55f),
-        label = "swipe_delete_icon_scale"
-    )
+    val surfaceVariantColor = MaterialTheme.colorScheme.surfaceVariant
+    val activeSwipeBrush = remember(surfaceVariantColor) {
+        Brush.horizontalGradient(
+            colors = listOf(
+                surfaceVariantColor,
+                CoralRose.copy(alpha = 0.32f),
+                CoralRose.copy(alpha = 0.85f)
+            )
+        )
+    }
+    val idleSwipeBrush = remember(surfaceVariantColor) {
+        Brush.horizontalGradient(
+            colors = listOf(
+                surfaceVariantColor,
+                CoralRose.copy(alpha = 0.12f),
+                CoralRose.copy(alpha = 0.35f)
+            )
+        )
+    }
 
     SwipeToDismissBox(
         state = dismissState,
         enableDismissFromStartToEnd = false,
         enableDismissFromEndToStart = true,
         backgroundContent = {
+            val isSwipingLeft = dismissState.targetValue == SwipeToDismissBoxValue.EndToStart ||
+                dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(RoundedCornerShape(20.dp))
-                    .background(
-                        brush = Brush.horizontalGradient(
-                            colors = listOf(
-                                MaterialTheme.colorScheme.surfaceVariant,
-                                CoralRose.copy(alpha = if (isSwipingLeft) 0.32f else 0.12f),
-                                CoralRose.copy(alpha = if (isSwipingLeft) 0.85f else 0.35f)
-                            )
-                        )
-                    )
+                    .background(brush = if (isSwipingLeft) activeSwipeBrush else idleSwipeBrush)
                     .padding(horizontal = 24.dp),
                 contentAlignment = Alignment.CenterEnd
             ) {
@@ -523,9 +531,7 @@ private fun SwipeableRepositoryTile(
                         imageVector = Icons.Default.DeleteOutline,
                         contentDescription = stringResource(R.string.remove_repository),
                         tint = Color(0xFF14161B),
-                        modifier = Modifier
-                            .size(24.dp)
-                            .scale(iconScale)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }
@@ -556,22 +562,6 @@ private fun RepositoryTileCard(
         else -> LavenderPop
     }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "sync_spin")
-    val spinDegrees by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 900, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "refresh_rotation"
-    )
-
-    val timeFormatter = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
-    val syncedTimeLabel = remember(repo.lastSyncedEpochMs) {
-        timeFormatter.format(Date(repo.lastSyncedEpochMs))
-    }
-
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(20.dp),
@@ -581,23 +571,29 @@ private fun RepositoryTileCard(
             .fillMaxWidth()
             .testTag("repo_tile_${repo.id}")
     ) {
-        Box(modifier = Modifier.fillMaxWidth()) {
-            Canvas(modifier = Modifier.matchParentSize()) {
-                val glowRadius = size.minDimension * 0.9f
-                drawCircle(
-                    brush = Brush.radialGradient(
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .drawWithCache {
+                    val glowRadius = size.minDimension * 0.9f
+                    val centerOffset = Offset(size.width * 0.92f, size.height * 0.15f)
+                    val glowBrush = Brush.radialGradient(
                         colors = listOf(
                             accentColor.copy(alpha = 0.14f),
                             Color.Transparent
                         ),
-                        center = Offset(size.width * 0.92f, size.height * 0.15f),
-                        radius = glowRadius
-                    ),
-                    center = Offset(size.width * 0.92f, size.height * 0.15f),
-                    radius = glowRadius
-                )
-            }
-
+                        center = centerOffset,
+                        radius = glowRadius.coerceAtLeast(1f)
+                    )
+                    onDrawBehind {
+                        drawCircle(
+                            brush = glowBrush,
+                            center = centerOffset,
+                            radius = glowRadius
+                        )
+                    }
+                }
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -621,7 +617,7 @@ private fun RepositoryTileCard(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "@${repo.owner}",
+                            text = repo.ownerHandle,
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -656,13 +652,9 @@ private fun RepositoryTileCard(
                                 .size(34.dp)
                                 .testTag("refresh_repo_${repo.id}")
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = stringResource(R.string.refresh_repository),
-                                tint = if (isSyncing) accentColor else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier
-                                    .size(18.dp)
-                                    .rotate(if (isSyncing) spinDegrees else 0f)
+                            SyncingRefreshIcon(
+                                isSyncing = isSyncing,
+                                accentColor = accentColor
                             )
                         }
                     }
@@ -739,11 +731,7 @@ private fun RepositoryTileCard(
                                 )
                                 Spacer(modifier = Modifier.width(5.dp))
                                 Text(
-                                    text = if (repo.isPendingPrivateSync) {
-                                        "URL SAVED"
-                                    } else {
-                                        "${repo.totalFilesCount} files (${repo.markdownFilesCount} .md)"
-                                    },
+                                    text = repo.fileSummaryLabel,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -752,13 +740,51 @@ private fun RepositoryTileCard(
                     }
 
                     Text(
-                        text = syncedTimeLabel,
+                        text = repo.syncedTimeFormatted,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
         }
+    }
+}
+
+/**
+ * Isolates the infinite spin animation so it ONLY runs when [isSyncing] is true,
+ * eliminating idle 120Hz frame ticks across all non-syncing repository cards.
+ */
+@Composable
+private fun SyncingRefreshIcon(
+    isSyncing: Boolean,
+    accentColor: Color
+) {
+    if (isSyncing) {
+        val infiniteTransition = rememberInfiniteTransition(label = "sync_spin")
+        val spinDegrees by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 900, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "refresh_rotation"
+        )
+        Icon(
+            imageVector = Icons.Default.Refresh,
+            contentDescription = stringResource(R.string.refresh_repository),
+            tint = accentColor,
+            modifier = Modifier
+                .size(18.dp)
+                .rotate(spinDegrees)
+        )
+    } else {
+        Icon(
+            imageVector = Icons.Default.Refresh,
+            contentDescription = stringResource(R.string.refresh_repository),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp)
+        )
     }
 }
 

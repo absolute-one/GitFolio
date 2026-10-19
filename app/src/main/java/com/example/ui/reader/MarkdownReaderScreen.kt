@@ -295,32 +295,30 @@ fun MarkdownReaderScreen(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.TopCenter
                     ) {
-                        SelectionContainer {
-                            LazyColumn(
-                                state = listState,
-                                contentPadding = PaddingValues(
-                                    start = 20.dp,
-                                    end = 20.dp,
-                                    top = 20.dp,
-                                    bottom = 96.dp
-                                ),
-                                verticalArrangement = Arrangement.spacedBy(14.dp),
-                                modifier = Modifier
-                                    .widthIn(max = 760.dp)
-                                    .fillMaxSize()
-                                    .testTag("markdown_virtualized_list")
-                            ) {
-                                itemsIndexed(
-                                    items = doc.blocks,
-                                    key = { _, block -> block.blockId },
-                                    contentType = { _, block -> block::class.simpleName }
-                                ) { _, block ->
-                                    MarkdownAstBlockView(
-                                        block = block,
-                                        fontScale = fontScale,
-                                        useSerifBody = useSerifBody
-                                    )
-                                }
+                        LazyColumn(
+                            state = listState,
+                            contentPadding = PaddingValues(
+                                start = 20.dp,
+                                end = 20.dp,
+                                top = 20.dp,
+                                bottom = 96.dp
+                            ),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier
+                                .widthIn(max = 760.dp)
+                                .fillMaxSize()
+                                .testTag("markdown_virtualized_list")
+                        ) {
+                            itemsIndexed(
+                                items = doc.blocks,
+                                key = { _, block -> block.blockId },
+                                contentType = { _, block -> block::class.simpleName }
+                            ) { _, block ->
+                                MarkdownAstBlockView(
+                                    block = block,
+                                    fontScale = fontScale,
+                                    useSerifBody = useSerifBody
+                                )
                             }
                         }
                     }

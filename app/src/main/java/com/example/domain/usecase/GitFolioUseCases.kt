@@ -158,26 +158,33 @@ class LoadRepositoryCommitGraphUseCase(
         branchFilter: String?
     ): List<GitGraphCommitRow> = withContext(Dispatchers.Default) {
         val q = rawQuery.trim().lowercase()
-        val branch = branchFilter?.trim()?.takeIf { it.isNotEmpty() }
+        val branchLower = branchFilter?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
 
-        if (q.isEmpty() && branch == null) return@withContext allRows
+        if (q.isEmpty() && branchLower == null) return@withContext allRows
 
-        allRows.filter { row ->
-            val matchesBranch = branch == null ||
-                row.commit.primaryBranch.equals(branch, ignoreCase = true) ||
-                row.commit.branchNames.any { it.equals(branch, ignoreCase = true) } ||
-                row.badgeLabel.equals(branch, ignoreCase = true)
+        val result = ArrayList<GitGraphCommitRow>(minOf(allRows.size, 256))
+        for (i in 0 until allRows.size) {
+            val row = allRows[i]
+            val commit = row.commit
+            val matchesBranch = branchLower == null ||
+                commit.primaryBranchLower == branchLower ||
+                row.badgeLabelLower == branchLower ||
+                commit.branchNamesLower.contains(branchLower)
 
-            if (!matchesBranch) return@filter false
-            if (q.isEmpty()) return@filter true
+            if (!matchesBranch) continue
 
-            row.commit.subject.lowercase().contains(q) ||
-                row.commit.shortSha.lowercase().contains(q) ||
-                row.commit.sha.lowercase().startsWith(q) ||
-                row.commit.authorName.lowercase().contains(q) ||
-                row.badgeLabel.lowercase().contains(q) ||
-                row.commit.branchNames.any { it.lowercase().contains(q) }
+            if (q.isEmpty() ||
+                commit.subjectLower.contains(q) ||
+                commit.shortShaLower.contains(q) ||
+                commit.shaLower.startsWith(q) ||
+                commit.authorNameLower.contains(q) ||
+                row.badgeLabelLower.contains(q) ||
+                commit.branchNamesLower.any { it.contains(q) }
+            ) {
+                result.add(row)
+            }
         }
+        result
     }
 }
 
@@ -207,20 +214,27 @@ class OpenDocumentAsMarkdownUseCase(
 
 class ComputeVisibleTreeNodesUseCase {
 
+    @Volatile
+    private var cachedSourceNodes: List<RepoFileNode>? = null
+
+    @Volatile
+    private var cachedChildrenByParent: Map<String, List<RepoFileNode>> = emptyMap()
+
     suspend operator fun invoke(
         allNodes: List<RepoFileNode>,
         expandedFolders: Set<String>,
         rawQuery: String,
         markdownOnly: Boolean
     ): List<RepoFileNode> = withContext(Dispatchers.Default) {
+        if (allNodes.isEmpty()) return@withContext emptyList()
         val query = rawQuery.trim().lowercase()
 
         if (query.isEmpty() && !markdownOnly) {
             return@withContext buildHierarchicalTree(allNodes, expandedFolders)
         }
 
-        val queryTokens = query.split(Regex("\\s+")).filter { it.isNotEmpty() }
-        val scoredResults = ArrayList<Pair<RepoFileNode, Int>>(allNodes.size)
+        val queryTokens = if (query.isEmpty()) emptyList() else query.split(WHITESPACE_REGEX).filter { it.isNotEmpty() }
+        val scoredResults = ArrayList<Pair<RepoFileNode, Int>>(minOf(allNodes.size, 512))
 
         for (node in allNodes) {
             if (markdownOnly) {
@@ -247,7 +261,11 @@ class ComputeVisibleTreeNodesUseCase {
                 .thenBy { it.first.nameLower }
         )
 
-        scoredResults.map { it.first }
+        val out = ArrayList<RepoFileNode>(scoredResults.size)
+        for (pair in scoredResults) {
+            out.add(pair.first)
+        }
+        out
     }
 
     private fun scoreNodeMatch(
@@ -295,20 +313,38 @@ class ComputeVisibleTreeNodesUseCase {
         return nIdx == needle.length
     }
 
+    private fun getOrBuildSortedChildrenMap(
+        allNodes: List<RepoFileNode>
+    ): Map<String, List<RepoFileNode>> {
+        val currentCached = cachedSourceNodes
+        if (currentCached === allNodes) {
+            return cachedChildrenByParent
+        }
+        val grouped = HashMap<String, MutableList<RepoFileNode>>()
+        for (node in allNodes) {
+            grouped.getOrPut(node.parentPath) { ArrayList() }.add(node)
+        }
+        val comparator = compareByDescending<RepoFileNode> { it.isDirectory }
+            .thenBy { it.nameLower }
+        for (entry in grouped.values) {
+            entry.sortWith(comparator)
+        }
+        cachedSourceNodes = allNodes
+        cachedChildrenByParent = grouped
+        return grouped
+    }
+
     private fun buildHierarchicalTree(
         allNodes: List<RepoFileNode>,
         expandedFolders: Set<String>
     ): List<RepoFileNode> {
-        val childrenByParent = allNodes.groupBy { it.parentPath }
-        val result = ArrayList<RepoFileNode>(allNodes.size)
+        val childrenByParent = getOrBuildSortedChildrenMap(allNodes)
+        val result = ArrayList<RepoFileNode>(minOf(allNodes.size, 256))
 
         fun visitDirectory(parentPath: String) {
-            val children = childrenByParent[parentPath].orEmpty()
-                .sortedWith(
-                    compareByDescending<RepoFileNode> { it.isDirectory }
-                        .thenBy { it.nameLower }
-                )
-            for (child in children) {
+            val children = childrenByParent[parentPath] ?: return
+            for (i in 0 until children.size) {
+                val child = children[i]
                 result.add(child)
                 if (child.isDirectory && expandedFolders.contains(child.path)) {
                     visitDirectory(child.path)
@@ -318,5 +354,9 @@ class ComputeVisibleTreeNodesUseCase {
 
         visitDirectory("")
         return result
+    }
+
+    companion object {
+        private val WHITESPACE_REGEX = Regex("\\s+")
     }
 }

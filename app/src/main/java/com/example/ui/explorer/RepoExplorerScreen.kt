@@ -108,14 +108,7 @@ fun RepoExplorerScreen(
     val uriHandler = LocalUriHandler.current
     var showBranchSelectorSheet by rememberSaveable { mutableStateOf(false) }
 
-    val quickFiles by remember(state.allNodes) {
-        derivedStateOf {
-            state.allNodes.filter {
-                !it.isDirectory && (it.isLicenseOrReadme || it.isPureMarkdown)
-            }.take(6)
-        }
-    }
-
+    val quickFiles = state.quickFiles
     val isSearchActive = state.searchQuery.isNotBlank() || state.markdownOnlyFilter
     val activeBranch = state.repository?.defaultBranch ?: "main"
     val availableBranches = state.availableBranches.ifEmpty { listOf(activeBranch) }
@@ -291,7 +284,7 @@ fun RepoExplorerScreen(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "Files (${state.allNodes.count { !it.isDirectory }})",
+                                    text = "Files (${state.totalFileCount})",
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = if (isFilesMode) FontWeight.Bold else FontWeight.Medium,
                                     color = if (isFilesMode) {
@@ -519,9 +512,7 @@ fun RepoExplorerScreen(
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
                                                 Icon(
-                                                    imageVector = if (quickNode.name.uppercase().startsWith("LICENSE") ||
-                                                        quickNode.name.uppercase().startsWith("COPYING")
-                                                    ) {
+                                                    imageVector = if (quickNode.isLicenseFile) {
                                                         Icons.Default.Gavel
                                                     } else {
                                                         Icons.Default.Description
@@ -569,9 +560,10 @@ fun RepoExplorerScreen(
                                 ) {
                                     items(
                                         items = state.visibleNodes,
-                                        key = { it.id }
+                                        key = { it.id },
+                                        contentType = { if (it.isDirectory) "dir_row" else "file_row" }
                                     ) { node ->
-                                        val isExpanded = state.expandedFolderPaths.contains(node.path)
+                                        val isExpanded = node.isDirectory && state.expandedFolderPaths.contains(node.path)
                                         FileTreeNodeRow(
                                             node = node,
                                             isExpanded = isExpanded,
@@ -581,7 +573,7 @@ fun RepoExplorerScreen(
                                         )
                                     }
 
-                                    item {
+                                    item(contentType = "bottom_spacer") {
                                         Spacer(modifier = Modifier.height(48.dp))
                                     }
                                 }
@@ -817,6 +809,10 @@ private fun SwitchBranchBottomSheet(
     }
 }
 
+private val FileRowShape = RoundedCornerShape(12.dp)
+private val FileBadgeShape = RoundedCornerShape(6.dp)
+private val SEARCH_SPLIT_REGEX = Regex("\\s+")
+
 @Composable
 private fun FileTreeNodeRow(
     node: RepoFileNode,
@@ -825,28 +821,20 @@ private fun FileTreeNodeRow(
     isFlatSearchMode: Boolean,
     onClick: () -> Unit
 ) {
-    val chevronRotation by animateFloatAsState(
-        targetValue = if (isExpanded) 90f else 0f,
-        label = "folder_chevron"
-    )
-
     val badgeColor = when {
         node.isDirectory -> ElectricAmber
         node.isPureMarkdown -> CyberMint
-        node.name.uppercase().startsWith("LICENSE") || node.name.uppercase().startsWith("COPYING") -> LavenderPop
+        node.isLicenseFile -> LavenderPop
         else -> CobaltAccent
     }
 
     val visualDepth = if (isFlatSearchMode) 0 else node.depth
+    val hasSearchQuery = searchQuery.isNotBlank()
     val highlightColor = MaterialTheme.colorScheme.primary
-
-    val highlightedName = remember(node.name, searchQuery, highlightColor) {
-        buildSearchHighlightedText(node.name, searchQuery, highlightColor)
-    }
 
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
+        shape = FileRowShape,
         color = if (node.isDirectory) {
             MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
         } else {
@@ -892,7 +880,7 @@ private fun FileTreeNodeRow(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
                         .size(18.dp)
-                        .rotate(chevronRotation)
+                        .rotate(if (isExpanded) 90f else 0f)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Icon(
@@ -903,7 +891,7 @@ private fun FileTreeNodeRow(
                 )
             } else {
                 val fileIcon = when {
-                    node.name.uppercase().startsWith("LICENSE") || node.name.uppercase().startsWith("COPYING") -> Icons.Default.Gavel
+                    node.isLicenseFile -> Icons.Default.Gavel
                     node.isPureMarkdown -> Icons.Default.Description
                     else -> Icons.Default.Code
                 }
@@ -917,19 +905,36 @@ private fun FileTreeNodeRow(
 
             Spacer(modifier = Modifier.width(10.dp))
 
+            val titleWeight = if (node.isDirectory || node.isLicenseOrReadme) {
+                FontWeight.SemiBold
+            } else {
+                FontWeight.Normal
+            }
+
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = highlightedName,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = if (node.isDirectory || node.isLicenseOrReadme) {
-                        FontWeight.SemiBold
-                    } else {
-                        FontWeight.Normal
-                    },
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                if (hasSearchQuery) {
+                    val highlightedName = remember(node.name, searchQuery, highlightColor) {
+                        buildSearchHighlightedText(node.name, searchQuery, highlightColor)
+                    }
+                    Text(
+                        text = highlightedName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = titleWeight,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else {
+                    Text(
+                        text = node.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = titleWeight,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
                 if ((isFlatSearchMode || !node.isDirectory) && node.parentPath.isNotEmpty()) {
                     Text(
                         text = node.path,
@@ -944,34 +949,34 @@ private fun FileTreeNodeRow(
             Spacer(modifier = Modifier.width(8.dp))
 
             if (node.isDirectory) {
-                Surface(
-                    color = badgeColor.copy(alpha = 0.14f),
-                    shape = RoundedCornerShape(6.dp)
+                Box(
+                    modifier = Modifier
+                        .background(badgeColor.copy(alpha = 0.14f), FileBadgeShape)
+                        .padding(horizontal = 7.dp, vertical = 2.dp)
                 ) {
                     Text(
                         text = if (isExpanded) "OPEN" else "DIR",
                         style = MaterialTheme.typography.labelSmall,
-                        color = badgeColor,
-                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                        color = badgeColor
                     )
                 }
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(
-                        color = badgeColor.copy(alpha = 0.14f),
-                        shape = RoundedCornerShape(6.dp)
+                    Box(
+                        modifier = Modifier
+                            .background(badgeColor.copy(alpha = 0.14f), FileBadgeShape)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = node.extension.uppercase().ifBlank { "DOC" },
+                            text = node.extensionBadge,
                             style = MaterialTheme.typography.labelSmall,
-                            color = badgeColor,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            color = badgeColor
                         )
                     }
-                    if (node.sizeBytes > 0) {
+                    if (node.formattedSize.isNotEmpty()) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = formatByteSize(node.sizeBytes),
+                            text = node.formattedSize,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -993,7 +998,7 @@ private fun buildSearchHighlightedText(
     return buildAnnotatedString {
         append(text)
         val lowerText = text.lowercase()
-        val tokens = query.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        val tokens = query.lowercase().split(SEARCH_SPLIT_REGEX).filter { it.isNotEmpty() }
         for (token in tokens) {
             var startIndex = lowerText.indexOf(token)
             while (startIndex >= 0) {
@@ -1008,13 +1013,5 @@ private fun buildSearchHighlightedText(
                 startIndex = lowerText.indexOf(token, startIndex + token.length)
             }
         }
-    }
-}
-
-private fun formatByteSize(bytes: Long): String {
-    return when {
-        bytes < 1024L -> "${bytes}B"
-        bytes < 1024L * 1024L -> String.format("%.1fKB", bytes / 1024f)
-        else -> String.format("%.1fMB", bytes / (1024f * 1024f))
     }
 }

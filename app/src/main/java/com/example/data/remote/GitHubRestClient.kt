@@ -1,6 +1,11 @@
 package com.example.data.remote
 
 import android.util.Base64
+import com.example.contracts.AdapterCapabilities
+import com.example.contracts.DataSensitivityLabel
+import com.example.contracts.OutboundPolicyGatePort
+import com.example.contracts.OutboundPurpose
+import com.example.contracts.OutboundRequestDescriptor
 import com.example.domain.model.GitCommitNode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -32,14 +37,46 @@ data class GitHubBranchRefDto(
 )
 
 /**
- * Clean REST client for GitHub API v3 + Raw Content streaming + Multi-branch Commit DAG fetching.
+ * Keystone Architecture — Section 10.5 & 15:
+ * Guarded Outbound Network Adapter for GitHub REST API v3 + Raw Content streaming.
+ * Every byte leaving the process passes the single `OutboundPolicyGatePort`.
  */
 class GitHubRestClient(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    private val outboundPolicyGate: OutboundPolicyGatePort? = null
 ) {
+    val declaredCapabilities = AdapterCapabilities(
+        adapterName = "GitHubRestNetworkAdapter",
+        atomicReplace = false,
+        coordinationWithOtherWriters = false,
+        durableFlush = false,
+        reliableChangeNotifications = false
+    )
+
+    private fun enforceOutboundPolicy(
+        purpose: OutboundPurpose,
+        destinationHost: String,
+        url: String,
+        workspaceId: String,
+        hasSecretToken: Boolean
+    ) {
+        val gate = outboundPolicyGate ?: return
+        val descriptor = OutboundRequestDescriptor(
+            purpose = purpose,
+            destinationHost = destinationHost,
+            url = url,
+            workspaceId = workspaceId,
+            sensitivityLabel = if (hasSecretToken) {
+                DataSensitivityLabel.AUTHENTICATED_REPO
+            } else {
+                DataSensitivityLabel.PUBLIC
+            }
+        )
+        gate.checkOutboundAllowed(descriptor).getOrThrow()
+    }
 
     suspend fun fetchRepoMetadata(
         owner: String,
@@ -47,8 +84,17 @@ class GitHubRestClient(
         repoSpecificToken: String
     ): Result<GitHubRepoMetaDto> = withContext(Dispatchers.IO) {
         runCatching {
+            val url = "https://api.github.com/repos/$owner/$repo"
+            enforceOutboundPolicy(
+                purpose = OutboundPurpose.PROBE_REPOSITORY,
+                destinationHost = "api.github.com",
+                url = url,
+                workspaceId = "$owner/$repo",
+                hasSecretToken = repoSpecificToken.isNotBlank()
+            )
+
             val requestBuilder = Request.Builder()
-                .url("https://api.github.com/repos/$owner/$repo")
+                .url(url)
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", "GitFolio-Android-Markdown-Reader")
             if (repoSpecificToken.isNotBlank()) {
@@ -102,8 +148,17 @@ class GitHubRestClient(
         repoSpecificToken: String
     ): Result<List<GitHubBranchRefDto>> = withContext(Dispatchers.IO) {
         runCatching {
+            val url = "https://api.github.com/repos/$owner/$repo/branches?per_page=100"
+            enforceOutboundPolicy(
+                purpose = OutboundPurpose.FETCH_BRANCHES,
+                destinationHost = "api.github.com",
+                url = url,
+                workspaceId = "$owner/$repo",
+                hasSecretToken = repoSpecificToken.isNotBlank()
+            )
+
             val requestBuilder = Request.Builder()
-                .url("https://api.github.com/repos/$owner/$repo/branches?per_page=100")
+                .url(url)
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", "GitFolio-Android-Markdown-Reader")
             if (repoSpecificToken.isNotBlank()) {
@@ -140,8 +195,17 @@ class GitHubRestClient(
         repoSpecificToken: String
     ): Result<List<GitCommitNode>> = withContext(Dispatchers.IO) {
         runCatching {
+            val url = "https://api.github.com/repos/$owner/$repo/commits?sha=$branch&per_page=$perPage"
+            enforceOutboundPolicy(
+                purpose = OutboundPurpose.FETCH_COMMIT_GRAPH,
+                destinationHost = "api.github.com",
+                url = url,
+                workspaceId = "$owner/$repo",
+                hasSecretToken = repoSpecificToken.isNotBlank()
+            )
+
             val requestBuilder = Request.Builder()
-                .url("https://api.github.com/repos/$owner/$repo/commits?sha=$branch&per_page=$perPage")
+                .url(url)
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", "GitFolio-Android-Markdown-Reader")
             if (repoSpecificToken.isNotBlank()) {
@@ -232,8 +296,17 @@ class GitHubRestClient(
         repoSpecificToken: String
     ): Result<List<GitHubTreeEntryDto>> = withContext(Dispatchers.IO) {
         runCatching {
+            val url = "https://api.github.com/repos/$owner/$repo/git/trees/$branch?recursive=1"
+            enforceOutboundPolicy(
+                purpose = OutboundPurpose.FETCH_GIT_TREE,
+                destinationHost = "api.github.com",
+                url = url,
+                workspaceId = "$owner/$repo",
+                hasSecretToken = repoSpecificToken.isNotBlank()
+            )
+
             val requestBuilder = Request.Builder()
-                .url("https://api.github.com/repos/$owner/$repo/git/trees/$branch?recursive=1")
+                .url(url)
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", "GitFolio-Android-Markdown-Reader")
             if (repoSpecificToken.isNotBlank()) {
@@ -285,9 +358,18 @@ class GitHubRestClient(
         repoSpecificToken: String
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
+            val apiUrl = "https://api.github.com/repos/$owner/$repo/contents/$path?ref=$branch"
+            enforceOutboundPolicy(
+                purpose = OutboundPurpose.FETCH_MARKDOWN_BLOB,
+                destinationHost = "api.github.com",
+                url = apiUrl,
+                workspaceId = "$owner/$repo",
+                hasSecretToken = repoSpecificToken.isNotBlank()
+            )
+
             if (repoSpecificToken.isNotBlank()) {
                 val apiReq = Request.Builder()
-                    .url("https://api.github.com/repos/$owner/$repo/contents/$path?ref=$branch")
+                    .url(apiUrl)
                     .header("Accept", "application/vnd.github.raw+json")
                     .header("User-Agent", "GitFolio-Android-Markdown-Reader")
                     .header("Authorization", formatAuthHeader(repoSpecificToken))
@@ -301,6 +383,14 @@ class GitHubRestClient(
             }
 
             val rawUrl = "https://raw.githubusercontent.com/$owner/$repo/$branch/$path"
+            enforceOutboundPolicy(
+                purpose = OutboundPurpose.FETCH_MARKDOWN_BLOB,
+                destinationHost = "raw.githubusercontent.com",
+                url = rawUrl,
+                workspaceId = "$owner/$repo",
+                hasSecretToken = repoSpecificToken.isNotBlank()
+            )
+
             val rawReqBuilder = Request.Builder()
                 .url(rawUrl)
                 .header("User-Agent", "GitFolio-Android-Markdown-Reader")
@@ -315,7 +405,7 @@ class GitHubRestClient(
             }
 
             val fallbackReqBuilder = Request.Builder()
-                .url("https://api.github.com/repos/$owner/$repo/contents/$path?ref=$branch")
+                .url(apiUrl)
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", "GitFolio-Android-Markdown-Reader")
             if (repoSpecificToken.isNotBlank()) {
